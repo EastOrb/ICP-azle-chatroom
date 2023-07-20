@@ -50,6 +50,14 @@ type MessagePayload = Record<{
 const roomStorage = new StableBTreeMap<string, Room>(0, 44, 1024);
 const messageStorage = new StableBTreeMap<string, Message>(1, 44, 1024);
 
+// Enum for Error Types
+enum ErrorType {
+  RoomNotFound = "ROOM_NOT_FOUND",
+  NotRoomOwner = "NOT_ROOM_OWNER",
+  NotRoomMember = "NOT_ROOM_MEMBER",
+  MessageNotFound = "MESSAGE_NOT_FOUND",
+}
+
 $query;
 // Retrieve rooms for the current user
 export function getRoomsForUser(): Result<Vec<Room>, string> {
@@ -68,10 +76,12 @@ export function getRoomsForUser(): Result<Vec<Room>, string> {
 $query;
 // Retrieve a specific room by ID
 export function getRoom(id: string): Result<Room, string> {
-  return match(roomStorage.get(id), {
-    Some: (room: Room) => Result.Ok<Room, string>(room),
-    None: () => Result.Err<Room, string>(`A room with id=${id} was not found.`),
-  });
+  const room = roomStorage.get(id);
+  if (room) {
+    return Result.Ok(room);
+  } else {
+    return Result.Err<Room, string>(ErrorType.RoomNotFound);
+  }
 }
 
 $update;
@@ -82,7 +92,7 @@ export function addRoom(payload: RoomPayload): Result<Room, string> {
     createdAt: ic.time(), // Set the creation timestamp to the current time
     updatedAt: Opt.None, // Set the initial update timestamp as None
     owner: ic.caller(), // Set the owner of the room as the current caller
-    members: [ic.caller()], // Initialize the members array with the caller as first member
+    members: [ic.caller()], // Initialize the members array with the caller as the first member
     ...payload,
   };
 
@@ -96,109 +106,93 @@ export function updateRoom(
   id: string,
   payload: RoomPayload
 ): Result<Room, string> {
-  return match(roomStorage.get(id), {
-    Some: (room: Room) => {
-      // Confirm only owner can call this function
-      if (ic.caller().toString() !== room.owner.toString()) {
-        return Result.Err<Room, string>(
-          `You are not authorized to update the room.`
-        );
-      }
+  const room = roomStorage.get(id);
+  if (!room) {
+    return Result.Err<Room, string>(ErrorType.RoomNotFound);
+  }
 
-      const updatedRoom: Room = {
-        ...room,
-        ...payload,
-        updatedAt: Opt.Some(ic.time()), // Set the update timestamp to the current time
-      };
-      roomStorage.insert(room.id, updatedRoom); // Update the room in the room storage
-      return Result.Ok<Room, string>(updatedRoom);
-    },
-    None: () =>
-      Result.Err<Room, string>(
-        `Couldn't update a room with id=${id}. Room not found.`
-      ),
-  });
+  // Confirm only owner can call this function
+  if (ic.caller().toString() !== room.owner.toString()) {
+    return Result.Err<Room, string>(ErrorType.NotRoomOwner);
+  }
+
+  const updatedRoom: Room = {
+    ...room,
+    ...payload,
+    updatedAt: Opt.Some(ic.time()), // Set the update timestamp to the current time
+  };
+  roomStorage.insert(room.id, updatedRoom); // Update the room in the room storage
+  return Result.Ok<Room, string>(updatedRoom);
 }
 
 $update;
 // Add a member to a room
-export function addMembersToRoom(
+export function addMemberToRoom(
   id: string,
   member: Principal
 ): Result<Room, string> {
-  return match(roomStorage.get(id), {
-    Some: (room: Room) => {
-      // Confirm only owner can call this function
-      if (ic.caller().toString() !== room.owner.toString()) {
-        return Result.Err<Room, string>(`You are not the owner of the room.`);
-      }
+  const room = roomStorage.get(id);
+  if (!room) {
+    return Result.Err<Room, string>(ErrorType.RoomNotFound);
+  }
 
-      room.members.push(member); // Add the member to the room's members array
-      roomStorage.insert(room.id, room); // Update the room in the room storage
-      return Result.Ok<Room, string>(room);
-    },
-    None: () =>
-      Result.Err<Room, string>(
-        `Couldn't update a room with id=${id}. Room not found.`
-      ),
-  });
+  // Confirm only owner can call this function
+  if (ic.caller().toString() !== room.owner.toString()) {
+    return Result.Err<Room, string>(ErrorType.NotRoomOwner);
+  }
+
+  // Check if the member is already in the room
+  if (room.members.map(String).includes(member.toString())) {
+    return Result.Err<Room, string>("Member is already in the room.");
+  }
+
+  room.members.push(member); // Add the member to the room's members array
+  roomStorage.insert(room.id, room); // Update the room in the room storage
+  return Result.Ok<Room, string>(room);
 }
 
 $update;
 // Delete a room
 export function deleteRoom(id: string): Result<string, string> {
-  return match(roomStorage.get(id), {
-    Some: (room: Room) => {
-      // Confirm only owner can call this function
-      if (ic.caller().toString() !== room.owner.toString()) {
-        return Result.Err<string, string>(
-          `You are not authorized to delete the room.`
-        );
-      }
+  const room = roomStorage.get(id);
+  if (!room) {
+    return Result.Err<string, string>(ErrorType.RoomNotFound);
+  }
 
-      // remove the messages in that room
-      const messages = messageStorage.values();
-      for (const message of messages) {
-        if (message.roomId === id) {
-          messageStorage.remove(message.id);
-        }
-      }
+  // Confirm only owner can call this function
+  if (ic.caller().toString() !== room.owner.toString()) {
+    return Result.Err<string, string>(ErrorType.NotRoomOwner);
+  }
 
-      roomStorage.remove(id); // Remove the room from the room storage
-      return Result.Err<string, string>(
-        `You are not authorized to delete the room.`
-      );
-    },
-    None: () => {
-      return Result.Err<string, string>(
-        `couldn't delete a room with id=${id}. room not found`
-      );
-    },
-  });
+  // Remove the messages in that room
+  const messages = messageStorage.values();
+  for (const message of messages) {
+    if (message.roomId === id) {
+      messageStorage.remove(message.id);
+    }
+  }
+
+  roomStorage.remove(id); // Remove the room from the room storage
+  return Result.Ok<string, string>(`Room ${id} deleted successfully`);
 }
 
 $update;
 // Send a message to a room
 export function sendMessage(payload: MessagePayload): Result<Message, string> {
-  return match(roomStorage.get(payload.roomId), {
-    Some: (room: Room) => {
-      // Confirm only members of room can call this function
-      const isMember = room.members
-        .map(String)
-        .includes(ic.caller().toString());
-      if (!isMember) {
-        return Result.Err<Message, string>(`You don't belong to this room.`);
-      }
+  const room = roomStorage.get(payload.roomId);
+  if (!room) {
+    return Result.Err<Message, string>(ErrorType.RoomNotFound);
+  }
 
-      const message = { sender: ic.caller(), id: uuidv4(), ...payload }; // Create the message payload
-      messageStorage.insert(message.id, message); // Store the message in the message storage
-      return Result.Ok<Message, string>(message);
-    },
-    None: () =>
-      Result.Err<Message, string>(
-        `A room with id=${payload.roomId} was not found.`
-      ),
-  });
+  // Confirm only members of the room can call this function
+  const isMember = room.members.map(String).includes(ic.caller().toString());
+  if (!isMember) {
+    return Result.Err<Message, string>(ErrorType.NotRoomMember);
+  }
+
+  const message = { sender: ic.caller(), id: uuidv4(), ...payload }; // Create the message payload
+  messageStorage.insert(message.id, message); // Store the message in the message storage
+  return Result.Ok<Message, string>(message);
 }
 
 $query;
@@ -206,66 +200,51 @@ $query;
 export function getMessagesForRoom(
   roomId: string
 ): Result<Vec<Message>, string> {
-  return match(roomStorage.get(roomId), {
-    Some: (room: Room) => {
-      // Confirm only members of room can call this function
-      const isMember = room.members
-        .map(String)
-        .includes(ic.caller().toString());
-      if (!isMember) {
-        return Result.Err<Message[], string>(`You don't belong to this room.`);
-      }
+  const room = roomStorage.get(roomId);
+  if (!room) {
+    return Result.Err<Vec<Message>, string>(ErrorType.Room
+// Retrieve messages for a room
+export function getMessagesForRoom(
+  roomId: string
+): Result<Vec<Message>, string> {
+  const room = roomStorage.get(roomId);
+  if (!room) {
+    return Result.Err<Vec<Message>, string>(ErrorType.RoomNotFound);
+  }
 
-      const messages = messageStorage.values(); // get all the messages
-      const returnedMessages: Message[] = [];
+  // Confirm only members of the room can call this function
+  const isMember = room.members.map(String).includes(ic.caller().toString());
+  if (!isMember) {
+    return Result.Err<Vec<Message>, string>(ErrorType.NotRoomMember);
+  }
 
-      for (const message of messages) {
-        if (message.roomId === roomId) {
-          returnedMessages.push(message); // filter messages for that room only
-        }
-      }
+  const messages = messageStorage.values(); // get all the messages
+  const returnedMessages: Message[] = [];
 
-      return Result.Ok<Message[], string>(returnedMessages);
-    },
-    None: () => {
-      return Result.Err<Message[], string>(
-        `A room with id=${roomId} was not found.`
-      );
-    },
-  });
+  for (const message of messages) {
+    if (message.roomId === roomId) {
+      returnedMessages.push(message); // filter messages for that room only
+    }
+  }
+
+  return Result.Ok<Vec<Message>, string>(returnedMessages);
 }
 
 $update;
 // Delete a message
 export function deleteMessage(id: string): Result<string, string> {
-  return match(messageStorage.get(id), {
-    Some: (message: Message) => {
-      // Confirm only owner of message can call this function
-      if (ic.caller().toString() !== message.sender.toString()) {
-        return Result.Err<string, string>(
-          `You are not authorized to delete this message.`
-        );
-      }
-      messageStorage.remove(id); // Remove the message from the message storage
-      return Result.Ok<string, string>(`Room ${id} deleted successfully`);
-    },
-    None: () => {
-      return Result.Err<string, string>(
-        `couldn't delete a message with id=${id}. message not found`
-      );
-    },
-  });
+  const message = messageStorage.get(id);
+  if (!message) {
+    return Result.Err<string, string>(ErrorType.MessageNotFound);
+  }
+
+  // Confirm only the sender of the message can call this function
+  if (ic.caller().toString() !== message.sender.toString()) {
+    return Result.Err<string, string>(
+      "You are not authorized to delete this message."
+    );
+  }
+
+  messageStorage.remove(id); // Remove the message from the message storage
+  return Result.Ok<string, string>(`Message ${id} deleted successfully`);
 }
-
-// a workaround to make uuid package work with Azle
-globalThis.crypto = {
-  getRandomValues: () => {
-    let array = new Uint8Array(32);
-
-    for (let i = 0; i < array.length; i++) {
-      array[i] = Math.floor(Math.random() * 256);
-    }
-
-    return array;
-  },
-};
